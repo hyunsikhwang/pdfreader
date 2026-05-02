@@ -9,7 +9,6 @@ from pathlib import Path
 
 import streamlit as st
 import opendataloader_pdf
-from pypdf import PdfReader
 
 
 @dataclass
@@ -19,16 +18,6 @@ class ExtractedTable:
     html: str
     markdown: str
     rows: list[list[str]]
-
-
-@dataclass
-class PdfSection:
-    index: int
-    title: str
-    start_page: int
-    end_page: int
-    level: int
-    source: str
 
 
 class TableHTMLParser(HTMLParser):
@@ -72,158 +61,6 @@ def is_java_available() -> bool:
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-
-
-def parse_page_numbers(value: str) -> set[int]:
-    pages: set[int] = set()
-
-    for chunk in value.split(","):
-        part = chunk.strip()
-        if not part:
-            continue
-
-        if "-" in part:
-            start_text, end_text = part.split("-", 1)
-            if start_text.strip().isdigit() and end_text.strip().isdigit():
-                start_page = int(start_text)
-                end_page = int(end_text)
-                if start_page <= end_page:
-                    pages.update(range(start_page, end_page + 1))
-            continue
-
-        if part.isdigit():
-            pages.add(int(part))
-
-    return pages
-
-
-def compact_page_numbers(pages: set[int]) -> str:
-    if not pages:
-        return ""
-
-    sorted_pages = sorted(pages)
-    ranges: list[str] = []
-    start = previous = sorted_pages[0]
-
-    for page in sorted_pages[1:]:
-        if page == previous + 1:
-            previous = page
-            continue
-
-        ranges.append(f"{start}-{previous}" if start != previous else str(start))
-        start = previous = page
-
-    ranges.append(f"{start}-{previous}" if start != previous else str(start))
-    return ",".join(ranges)
-
-
-def flatten_pdf_outline(reader: PdfReader) -> list[tuple[str, int, int]]:
-    outline_items: list[tuple[str, int, int]] = []
-
-    def walk(items: object, level: int) -> None:
-        if not isinstance(items, list):
-            return
-
-        for item in items:
-            if isinstance(item, list):
-                walk(item, level + 1)
-                continue
-
-            title = normalize_text(str(getattr(item, "title", "")))
-            if not title:
-                continue
-
-            try:
-                page_number = reader.get_destination_page_number(item) + 1
-            except Exception:
-                continue
-
-            outline_items.append((title, page_number, level))
-
-    try:
-        walk(reader.outline, 0)
-    except Exception:
-        return []
-
-    return outline_items
-
-
-def first_meaningful_page_line(text: str, page_number: int) -> str:
-    for line in text.splitlines()[:20]:
-        candidate = normalize_text(line)
-        if 4 <= len(candidate) <= 120:
-            return candidate
-
-    return f"{page_number}페이지"
-
-
-def infer_sections_from_pages(reader: PdfReader, max_pages: int = 80) -> list[PdfSection]:
-    sections: list[PdfSection] = []
-    page_count = len(reader.pages)
-
-    for page_index, page in enumerate(reader.pages[:max_pages]):
-        page_number = page_index + 1
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-
-        title = first_meaningful_page_line(text, page_number)
-        sections.append(
-            PdfSection(
-                index=len(sections) + 1,
-                title=title,
-                start_page=page_number,
-                end_page=page_number,
-                level=0,
-                source="페이지 제목 추정",
-            )
-        )
-
-    if page_count > max_pages:
-        sections.append(
-            PdfSection(
-                index=len(sections) + 1,
-                title=f"{max_pages + 1}-{page_count}페이지",
-                start_page=max_pages + 1,
-                end_page=page_count,
-                level=0,
-                source="페이지 범위",
-            )
-        )
-
-    return sections
-
-
-def extract_pdf_sections(input_path: str) -> list[PdfSection]:
-    reader = PdfReader(input_path)
-    page_count = len(reader.pages)
-    outline_items = flatten_pdf_outline(reader)
-
-    if outline_items:
-        sections: list[PdfSection] = []
-        for item_index, (title, start_page, level) in enumerate(outline_items):
-            next_pages = [
-                page
-                for _, page, next_level in outline_items[item_index + 1 :]
-                if next_level <= level and page >= start_page
-            ]
-            end_page = (min(next_pages) - 1) if next_pages else page_count
-            end_page = max(start_page, min(end_page, page_count))
-            sections.append(
-                PdfSection(
-                    index=len(sections) + 1,
-                    title=title,
-                    start_page=start_page,
-                    end_page=end_page,
-                    level=level,
-                    source="PDF 내장 목차",
-                )
-            )
-
-        return sections
-
-    return infer_sections_from_pages(reader)
 
 
 def extract_html_tables(html_text: str) -> list[str]:
@@ -308,14 +145,13 @@ def markdown_table_to_rows(markdown_table: str) -> list[list[str]]:
     return rows
 
 
-def parse_pdf_tables(input_path: str, pages: str | None = None) -> list[ExtractedTable]:
+def parse_pdf_tables(input_path: str) -> list[ExtractedTable]:
     with tempfile.TemporaryDirectory() as output_dir:
         opendataloader_pdf.convert(
             input_path=input_path,
             output_dir=output_dir,
             format=["html", "markdown"],
             quiet=True,
-            pages=pages,
         )
 
         tables: list[ExtractedTable] = []
@@ -477,47 +313,6 @@ def filter_tables_by_query(tables: list[ExtractedTable], query: str) -> list[Ext
     return [table for table in tables if table_matches_query(table, cleaned_query)]
 
 
-def section_option_label(section: PdfSection) -> str:
-    indent = "  " * min(section.level, 3)
-    page_range = (
-        str(section.start_page)
-        if section.start_page == section.end_page
-        else f"{section.start_page}-{section.end_page}"
-    )
-    return f"{indent}{section.index}. {section.title} · p.{page_range}"
-
-
-def pages_from_sections(sections: list[PdfSection]) -> str:
-    pages: set[int] = set()
-
-    for section in sections:
-        pages.update(range(section.start_page, section.end_page + 1))
-
-    return compact_page_numbers(pages)
-
-
-def render_section_index(sections: list[PdfSection]) -> None:
-    preview_rows = []
-    for section in sections[:80]:
-        page_range = (
-            str(section.start_page)
-            if section.start_page == section.end_page
-            else f"{section.start_page}-{section.end_page}"
-        )
-        preview_rows.append(
-            {
-                "항목": section.index,
-                "제목": ("  " * min(section.level, 3)) + shorten_text(section.title, 100),
-                "페이지": page_range,
-                "출처": section.source,
-            }
-        )
-
-    st.dataframe(preview_rows, hide_index=True, use_container_width=True)
-    if len(sections) > len(preview_rows):
-        st.caption(f"화면에는 처음 {len(preview_rows)}개 항목만 표시했습니다.")
-
-
 def render_table_micro_index(tables: list[ExtractedTable]) -> None:
     summary_rows = []
     for table in tables:
@@ -601,118 +396,61 @@ else:
     st.caption(f"{uploaded_file.name} · {uploaded_file.size:,} bytes")
     if st.session_state.get("uploaded_file_key") not in {None, uploaded_file_key}:
         st.session_state.pop("tables", None)
+        st.session_state.pop("filtered_tables", None)
+        st.session_state.pop("table_query", None)
         st.session_state.pop("table_source", None)
-        st.session_state.pop("table_pages", None)
-        st.session_state.pop("pdf_sections", None)
+        st.session_state["uploaded_file_key"] = uploaded_file_key
 
-    sections = st.session_state.get("pdf_sections")
-    if sections is None:
-        suffix = Path(uploaded_file.name).suffix or ".pdf"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            tmp_file.write(uploaded_file.getbuffer())
-            tmp_path = tmp_file.name
-
-        try:
-            with st.spinner("PDF 목차를 먼저 파악하는 중입니다..."):
-                sections = extract_pdf_sections(tmp_path)
-            st.session_state["pdf_sections"] = sections
-            st.session_state["uploaded_file_key"] = uploaded_file_key
-        except Exception as exc:
-            sections = []
-            st.session_state["pdf_sections"] = sections
-            st.session_state["uploaded_file_key"] = uploaded_file_key
-            st.warning(f"PDF 목차를 읽지 못했습니다. 페이지 직접 입력으로 진행해 주세요.\n\n상세: {exc}")
-        finally:
-            os.unlink(tmp_path)
-
-    if sections:
-        st.subheader("목차")
-        st.caption(
-            f"{sections[0].source} 기반으로 항목을 만들었습니다. "
-            "필요한 항목만 선택하면 해당 페이지 범위만 분석합니다."
+    with st.form("table-search"):
+        table_query = st.text_input(
+            "테이블 내용 조건",
+            placeholder='예: 매출 AND 영업이익 / "현금흐름" OR EBITDA / 매출 NOT 전년',
+            help="공백은 AND로 처리합니다. OR, NOT, 따옴표 문구 검색을 사용할 수 있습니다. 비워두면 모든 테이블을 가져옵니다.",
         )
-        render_section_index(sections)
-
-    with st.form("parse-options"):
-        selected_sections: list[str] = []
-        section_lookup: dict[str, PdfSection] = {}
-
-        if sections:
-            section_lookup = {section_option_label(section): section for section in sections}
-            selected_sections = st.multiselect(
-                "분석할 목차 항목",
-                options=list(section_lookup.keys()),
-                default=[],
-                placeholder="테이블을 찾을 항목만 선택하세요.",
-                help="선택한 항목의 페이지 범위를 합쳐서 테이블 파서에 전달합니다.",
-            )
-
-        pages = st.text_input(
-            "페이지 직접 입력",
-            placeholder="예: 1,3,5-7",
-            help="목차 항목이 없거나 범위를 더 좁히고 싶을 때 사용하세요. 입력하면 목차 선택보다 우선합니다.",
-        )
-        submitted = st.form_submit_button("분석 시작", type="primary")
+        submitted = st.form_submit_button("테이블 검색", type="primary")
 
     if submitted:
-        selected_section_objects = [
-            section_lookup[label]
-            for label in selected_sections
-            if label in section_lookup
-        ]
-        manual_pages = pages.strip()
-        if manual_pages:
-            selected_pages = compact_page_numbers(parse_page_numbers(manual_pages))
-            if not selected_pages:
-                st.warning("페이지 직접 입력은 `1,3,5-7` 같은 숫자와 범위 형식으로 입력해 주세요.")
-                st.stop()
-        else:
-            selected_pages = pages_from_sections(selected_section_objects)
-
-        if not selected_pages:
-            st.warning("분석할 목차 항목을 선택하거나 페이지 범위를 입력해 주세요.")
-            st.stop()
-
         suffix = Path(uploaded_file.name).suffix or ".pdf"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             tmp_file.write(uploaded_file.getbuffer())
             tmp_path = tmp_file.name
 
         try:
-            with st.spinner("지정한 페이지에서 테이블을 찾는 중입니다..."):
-                tables = parse_pdf_tables(tmp_path, pages=selected_pages)
+            with st.spinner("PDF 전체에서 테이블을 추출하고 조건을 적용하는 중입니다..."):
+                tables = parse_pdf_tables(tmp_path)
+                filtered_tables = filter_tables_by_query(tables, table_query)
 
             st.session_state["tables"] = tables
+            st.session_state["filtered_tables"] = filtered_tables
+            st.session_state["table_query"] = table_query.strip()
             st.session_state["table_source"] = uploaded_file.name
-            st.session_state["table_pages"] = selected_pages
+            st.session_state["uploaded_file_key"] = uploaded_file_key
 
         except Exception as exc:
             st.session_state.pop("tables", None)
+            st.session_state.pop("filtered_tables", None)
             st.error(f"PDF 파싱에 실패했습니다. 파일 형식 또는 내용 확인 후 다시 시도해 주세요.\n\n상세: {exc}")
         finally:
             os.unlink(tmp_path)
 
     tables = st.session_state.get("tables")
-    if tables is not None:
+    filtered_tables = st.session_state.get("filtered_tables")
+    if tables is not None and filtered_tables is not None:
         st.subheader("Tables")
-        st.caption(
-            f"{st.session_state.get('table_source', uploaded_file.name)} · "
-            f"페이지: {st.session_state.get('table_pages', '전체')}"
-        )
+        st.caption(st.session_state.get("table_source", uploaded_file.name))
 
         if not tables:
-            st.warning("선택한 페이지에서 추출 가능한 테이블을 찾지 못했습니다.")
+            st.warning("업로드한 PDF에서 추출 가능한 테이블을 찾지 못했습니다.")
         else:
-            st.metric("발견된 테이블", len(tables))
-            table_query = st.text_input(
-                "테이블 내용 조건",
-                placeholder='예: 매출 AND 영업이익 / "현금흐름" OR EBITDA / 매출 NOT 전년',
-                help="공백으로 나열한 단어는 AND로 처리합니다. OR, NOT, 따옴표 문구 검색을 사용할 수 있습니다.",
-            )
-            filtered_tables = filter_tables_by_query(tables, table_query)
+            metric_columns = st.columns(2)
+            metric_columns[0].metric("전체 테이블", len(tables))
+            metric_columns[1].metric("조건 일치", len(filtered_tables))
 
-            if table_query.strip():
-                st.caption(f"조건에 맞는 테이블 {len(filtered_tables)}개")
+            active_query = st.session_state.get("table_query", "")
+            if active_query:
+                st.caption(f"적용 조건: `{active_query}`")
+            else:
+                st.caption("조건 없이 모든 테이블을 표시합니다.")
 
             if not filtered_tables:
                 st.warning("조건에 맞는 테이블이 없습니다. 검색어 또는 논리 조건을 조정해 주세요.")

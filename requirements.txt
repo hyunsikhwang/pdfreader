@@ -1,3 +1,2 @@
 streamlit
 opendataloader-pdf
-pypdf
