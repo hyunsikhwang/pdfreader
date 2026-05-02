@@ -11,7 +11,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-`opendataloader-pdf`는 PDF 파싱 과정에서 Java 실행 환경을 사용합니다. 앱 실행 전에 Java 17 이상을 설치하고 `java` 명령이 터미널에서 실행되는지 확인하세요.
+`opendataloader-pdf`는 PDF 파싱 과정에서 Java 실행 환경을 사용합니다. 로컬 실행 시에는 Java 런타임을 설치하고 `java` 명령이 터미널에서 실행되는지 확인하세요.
 
 Windows에서는 다음 명령으로 설치할 수 있습니다.
 
@@ -25,9 +25,10 @@ java -version
 ## Streamlit Cloud 배포
 
 - 저장소 루트의 `requirements.txt`를 기준으로 의존성을 자동 설치합니다.
+- 저장소 루트의 `packages.txt`를 기준으로 Java 런타임(`default-jre-headless`)을 함께 설치합니다.
 - 앱 시작 명령은 `streamlit run app.py`를 사용합니다.
 - Python 버전은 Streamlit Cloud의 앱 설정(Advanced settings)에서 지정할 수 있으며, 지정하지 않으면 기본 버전이 사용됩니다.
-- 배포 환경에서도 Java가 필요합니다. Streamlit Cloud에서 동일한 오류가 발생하면 Java를 포함할 수 있는 배포 환경으로 전환하거나, Java 의존성이 없는 PDF 파서로 교체해야 합니다.
+- `packages.txt`를 추가하거나 변경한 뒤에는 Streamlit Cloud에서 앱을 재부팅해야 시스템 패키지가 다시 설치됩니다.
 
 ## 샘플 사용 흐름
 

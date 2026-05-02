@@ -21,8 +21,10 @@ if uploaded_file is None:
     st.info("PDF 파일을 업로드하면 분석 결과를 확인할 수 있습니다.")
 elif not is_java_available():
     st.error(
-        "PDF 파서 실행에 Java가 필요하지만 현재 환경에서 `java` 명령을 찾을 수 없습니다.\n\n"
-        "Java 17 이상을 설치한 뒤 `JAVA_HOME`과 `PATH`를 설정하고 앱을 다시 실행해 주세요."
+        "PDF 파서 실행에 Java 런타임이 필요하지만 현재 Streamlit 실행 환경에서 "
+        "`java` 명령을 찾을 수 없습니다.\n\n"
+        "Streamlit Cloud 배포 시 저장소 루트의 `packages.txt`에 "
+        "`default-jre-headless`가 포함되어 있는지 확인한 뒤 앱을 재부팅해 주세요."
     )
 else:
     suffix = Path(uploaded_file.name).suffix or ".pdf"
