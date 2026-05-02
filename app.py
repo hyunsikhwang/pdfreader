@@ -12,6 +12,26 @@ def is_java_available() -> bool:
     return shutil.which("java") is not None
 
 
+def parse_pdf(input_path: str) -> object:
+    with tempfile.TemporaryDirectory() as output_dir:
+        opendataloader_pdf.convert(
+            input_path=input_path,
+            output_dir=output_dir,
+            format="json",
+            quiet=True,
+        )
+
+        output_files = sorted(Path(output_dir).glob("*.json"))
+        if not output_files:
+            raise RuntimeError("파서가 JSON 결과 파일을 생성하지 않았습니다.")
+
+        result_text = output_files[0].read_text(encoding="utf-8")
+        if not result_text.strip():
+            raise RuntimeError("파서가 빈 JSON 결과 파일을 생성했습니다.")
+
+        return json.loads(result_text)
+
+
 st.set_page_config(page_title="PDF Analyzer", layout="centered")
 st.title("PDF Analyzer")
 
@@ -34,18 +54,10 @@ else:
 
     try:
         with st.spinner("PDF를 분석하는 중입니다..."):
-            result = opendataloader_pdf.convert(input_path=tmp_path)
+            result = parse_pdf(tmp_path)
 
         st.subheader("Parsed Result")
-
-        if isinstance(result, (dict, list)):
-            st.json(result)
-        else:
-            try:
-                parsed_result = json.loads(result)
-                st.json(parsed_result)
-            except Exception:
-                st.write(result)
+        st.json(result)
 
     except Exception as exc:
         st.error(f"PDF 파싱에 실패했습니다. 파일 형식 또는 내용 확인 후 다시 시도해 주세요.\n\n상세: {exc}")
