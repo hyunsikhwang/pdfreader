@@ -145,13 +145,14 @@ def markdown_table_to_rows(markdown_table: str) -> list[list[str]]:
     return rows
 
 
-def parse_pdf_tables(input_path: str) -> list[ExtractedTable]:
+def parse_pdf_tables(input_path: str, pages: str | None = None) -> list[ExtractedTable]:
     with tempfile.TemporaryDirectory() as output_dir:
         opendataloader_pdf.convert(
             input_path=input_path,
             output_dir=output_dir,
-            format=["html", "markdown", "json"],
+            format=["html", "markdown"],
             quiet=True,
+            pages=pages,
         )
 
         tables: list[ExtractedTable] = []
@@ -210,9 +211,81 @@ def rows_to_preview_records(rows: list[list[str]]) -> list[dict[str, str]]:
     ]
 
 
+def rows_to_preview_records_limited(
+    rows: list[list[str]],
+    max_rows: int = 5,
+    max_columns: int = 6,
+) -> list[dict[str, str]]:
+    records = rows_to_preview_records(rows[:max_rows])
+    return [
+        {
+            column: shorten_text(value, 80)
+            for column, value in list(record.items())[:max_columns]
+        }
+        for record in records
+    ]
+
+
+def shorten_text(value: str, max_length: int = 120) -> str:
+    text = normalize_text(value)
+    if len(text) <= max_length:
+        return text
+
+    return text[: max_length - 1] + "…"
+
+
+def table_dimensions(table: ExtractedTable) -> tuple[int, int]:
+    if not table.rows:
+        return 0, 0
+
+    return len(table.rows), max(len(row) for row in table.rows)
+
+
+def table_fingerprint(table: ExtractedTable) -> str:
+    cells: list[str] = []
+    for row in table.rows[:4]:
+        for cell in row[:4]:
+            text = normalize_text(cell)
+            if text:
+                cells.append(text)
+
+    if not cells:
+        return "내용 미리보기가 없습니다."
+
+    return shorten_text(" · ".join(cells), 180)
+
+
+def table_option_label(table: ExtractedTable) -> str:
+    row_count, column_count = table_dimensions(table)
+    return f"Table {table.index} · {row_count}행 x {column_count}열 · {table_fingerprint(table)}"
+
+
+def render_table_micro_index(tables: list[ExtractedTable]) -> None:
+    summary_rows = []
+    for table in tables:
+        row_count, column_count = table_dimensions(table)
+        summary_rows.append(
+            {
+                "ID": f"Table {table.index}",
+                "크기": f"{row_count}행 x {column_count}열",
+                "식별 단서": table_fingerprint(table),
+            }
+        )
+
+    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+
 def render_table_preview(table: ExtractedTable) -> None:
-    st.caption(f"{table.source} · {len(table.rows)}행")
-    st.dataframe(rows_to_preview_records(table.rows), hide_index=True, use_container_width=True)
+    row_count, column_count = table_dimensions(table)
+    st.caption(
+        f"{table.source} · 전체 {row_count}행 x {column_count}열 · "
+        "화면 미리보기는 성능을 위해 일부 행과 열만 표시합니다."
+    )
+    st.dataframe(
+        rows_to_preview_records_limited(table.rows),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 
 def wrap_html_document(title: str, body: str) -> str:
@@ -266,73 +339,88 @@ elif not is_java_available():
         "`default-jre-headless`가 포함되어 있는지 확인한 뒤 앱을 재부팅해 주세요."
     )
 else:
-    suffix = Path(uploaded_file.name).suffix or ".pdf"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-        tmp_file.write(uploaded_file.getbuffer())
-        tmp_path = tmp_file.name
+    st.caption(f"{uploaded_file.name} · {uploaded_file.size:,} bytes")
+    if st.session_state.get("table_source") not in {None, uploaded_file.name}:
+        st.session_state.pop("tables", None)
+        st.session_state.pop("table_source", None)
+        st.session_state.pop("table_pages", None)
 
-    try:
-        with st.spinner("PDF를 분석하는 중입니다..."):
-            tables = parse_pdf_tables(tmp_path)
+    with st.form("parse-options"):
+        pages = st.text_input(
+            "확인할 페이지",
+            placeholder="예: 1,3,5-7",
+            help="비워두면 전체 PDF를 분석합니다. 큰 PDF는 필요한 페이지만 지정하면 훨씬 빠릅니다.",
+        )
+        submitted = st.form_submit_button("분석 시작", type="primary")
 
+    if submitted:
+        suffix = Path(uploaded_file.name).suffix or ".pdf"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(uploaded_file.getbuffer())
+            tmp_path = tmp_file.name
+
+        try:
+            with st.spinner("지정한 페이지에서 테이블을 찾는 중입니다..."):
+                tables = parse_pdf_tables(tmp_path, pages=pages.strip() or None)
+
+            st.session_state["tables"] = tables
+            st.session_state["table_source"] = uploaded_file.name
+            st.session_state["table_pages"] = pages.strip() or "전체"
+
+        except Exception as exc:
+            st.session_state.pop("tables", None)
+            st.error(f"PDF 파싱에 실패했습니다. 파일 형식 또는 내용 확인 후 다시 시도해 주세요.\n\n상세: {exc}")
+        finally:
+            os.unlink(tmp_path)
+
+    tables = st.session_state.get("tables")
+    if tables is not None:
         st.subheader("Tables")
+        st.caption(
+            f"{st.session_state.get('table_source', uploaded_file.name)} · "
+            f"페이지: {st.session_state.get('table_pages', '전체')}"
+        )
 
         if not tables:
-            st.warning("업로드한 PDF에서 추출 가능한 테이블을 찾지 못했습니다.")
+            st.warning("선택한 페이지에서 추출 가능한 테이블을 찾지 못했습니다.")
         else:
-            table_options = {
-                f"Table {table.index} · {len(table.rows)}행 · {table.source}": table
-                for table in tables
-            }
-            selected_labels = st.multiselect(
-                "미리 보고 내보낼 테이블을 선택하세요.",
-                options=list(table_options.keys()),
-                default=list(table_options.keys()),
+            st.metric("발견된 테이블", len(tables))
+            render_table_micro_index(tables)
+
+            table_lookup = {table_option_label(table): table for table in tables}
+            detail_label = st.selectbox(
+                "상세 미리보기",
+                options=["미리보기 없음"] + list(table_lookup.keys()),
+                help="한 번에 하나만 열어 화면 렌더링 부담을 줄입니다.",
             )
-            selected_tables = [table_options[label] for label in selected_labels]
+            if detail_label != "미리보기 없음":
+                detail_table = table_lookup[detail_label]
+                render_table_preview(detail_table)
+
+            selected_labels = st.multiselect(
+                "내보낼 테이블",
+                options=list(table_lookup.keys()),
+                default=[],
+                placeholder="내보낼 테이블만 선택하세요.",
+            )
+            selected_tables = [table_lookup[label] for label in selected_labels]
 
             output_format = st.radio(
-                "출력 형식",
+                "내보내기 형식",
                 options=["HTML", "Markdown"],
                 horizontal=True,
             )
 
-            for table in selected_tables:
-                with st.expander(f"Table {table.index}", expanded=True):
-                    render_table_preview(table)
-
-                    if output_format == "HTML":
-                        st.markdown(table.html, unsafe_allow_html=True)
-                        st.download_button(
-                            "HTML 내보내기",
-                            data=wrap_html_document(f"Table {table.index}", table.html),
-                            file_name=f"table-{table.index}.html",
-                            mime="text/html",
-                            key=f"download-html-{table.index}",
-                        )
-                    else:
-                        st.markdown(table.markdown)
-                        st.download_button(
-                            "Markdown 내보내기",
-                            data=table.markdown,
-                            file_name=f"table-{table.index}.md",
-                            mime="text/markdown",
-                            key=f"download-markdown-{table.index}",
-                        )
-
-            if selected_tables:
+            if not selected_tables:
+                st.info("선택한 테이블만 export 대상이 됩니다. 기본값은 비워 두어 화면 렌더링을 가볍게 유지합니다.")
+            else:
                 combined_output = combine_tables(selected_tables, output_format)
                 extension = "html" if output_format == "HTML" else "md"
                 mime_type = "text/html" if output_format == "HTML" else "text/markdown"
                 st.download_button(
-                    "선택한 테이블 전체 내보내기",
+                    f"선택한 {len(selected_tables)}개 테이블 내보내기",
                     data=combined_output,
                     file_name=f"selected-tables.{extension}",
                     mime=mime_type,
                     type="primary",
                 )
-
-    except Exception as exc:
-        st.error(f"PDF 파싱에 실패했습니다. 파일 형식 또는 내용 확인 후 다시 시도해 주세요.\n\n상세: {exc}")
-    finally:
-        os.unlink(tmp_path)
