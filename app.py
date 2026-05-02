@@ -423,6 +423,60 @@ def table_option_label(table: ExtractedTable) -> str:
     return f"Table {table.index} · {row_count}행 x {column_count}열 · {table_fingerprint(table)}"
 
 
+def table_search_text(table: ExtractedTable) -> str:
+    return normalize_text(" ".join(cell for row in table.rows for cell in row)).casefold()
+
+
+def tokenize_table_query(query: str) -> list[str]:
+    tokens = re.findall(r'"([^"]+)"|(\S+)', query)
+    return [quoted or plain for quoted, plain in tokens]
+
+
+def table_matches_query(table: ExtractedTable, query: str) -> bool:
+    tokens = tokenize_table_query(query)
+    if not tokens:
+        return True
+
+    text = table_search_text(table)
+    groups: list[list[tuple[str, bool]]] = [[]]
+    negate_next = False
+
+    for token in tokens:
+        upper_token = token.upper()
+        if upper_token == "OR":
+            if groups[-1]:
+                groups.append([])
+            negate_next = False
+            continue
+
+        if upper_token == "AND":
+            continue
+
+        if upper_token == "NOT":
+            negate_next = True
+            continue
+
+        groups[-1].append((token.casefold(), negate_next))
+        negate_next = False
+
+    for group in groups:
+        if not group:
+            continue
+
+        if all((term not in text) if negated else (term in text) for term, negated in group):
+            return True
+
+    return False
+
+
+def filter_tables_by_query(tables: list[ExtractedTable], query: str) -> list[ExtractedTable]:
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        return tables
+
+    return [table for table in tables if table_matches_query(table, cleaned_query)]
+
+
 def section_option_label(section: PdfSection) -> str:
     indent = "  " * min(section.level, 3)
     page_range = (
@@ -650,9 +704,23 @@ else:
             st.warning("선택한 페이지에서 추출 가능한 테이블을 찾지 못했습니다.")
         else:
             st.metric("발견된 테이블", len(tables))
-            render_table_micro_index(tables)
+            table_query = st.text_input(
+                "테이블 내용 조건",
+                placeholder='예: 매출 AND 영업이익 / "현금흐름" OR EBITDA / 매출 NOT 전년',
+                help="공백으로 나열한 단어는 AND로 처리합니다. OR, NOT, 따옴표 문구 검색을 사용할 수 있습니다.",
+            )
+            filtered_tables = filter_tables_by_query(tables, table_query)
 
-            table_lookup = {table_option_label(table): table for table in tables}
+            if table_query.strip():
+                st.caption(f"조건에 맞는 테이블 {len(filtered_tables)}개")
+
+            if not filtered_tables:
+                st.warning("조건에 맞는 테이블이 없습니다. 검색어 또는 논리 조건을 조정해 주세요.")
+                st.stop()
+
+            render_table_micro_index(filtered_tables)
+
+            table_lookup = {table_option_label(table): table for table in filtered_tables}
             detail_label = st.selectbox(
                 "상세 미리보기",
                 options=["미리보기 없음"] + list(table_lookup.keys()),
@@ -662,13 +730,20 @@ else:
                 detail_table = table_lookup[detail_label]
                 render_table_preview(detail_table)
 
-            selected_labels = st.multiselect(
-                "내보낼 테이블",
-                options=list(table_lookup.keys()),
-                default=[],
-                placeholder="내보낼 테이블만 선택하세요.",
+            export_all_filtered = st.checkbox(
+                "조건에 맞는 테이블 전체를 export 대상으로 사용",
+                value=False,
             )
-            selected_tables = [table_lookup[label] for label in selected_labels]
+            if export_all_filtered:
+                selected_tables = filtered_tables
+            else:
+                selected_labels = st.multiselect(
+                    "내보낼 테이블",
+                    options=list(table_lookup.keys()),
+                    default=[],
+                    placeholder="내보낼 테이블만 선택하세요.",
+                )
+                selected_tables = [table_lookup[label] for label in selected_labels]
 
             output_format = st.radio(
                 "내보내기 형식",
@@ -677,7 +752,7 @@ else:
             )
 
             if not selected_tables:
-                st.info("선택한 테이블만 export 대상이 됩니다. 기본값은 비워 두어 화면 렌더링을 가볍게 유지합니다.")
+                st.info("선택한 테이블만 export 대상이 됩니다. 조건 필터로 좁힌 뒤 필요한 테이블만 고르세요.")
             else:
                 combined_output = combine_tables(selected_tables, output_format)
                 extension = "html" if output_format == "HTML" else "md"
