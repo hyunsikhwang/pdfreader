@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from html import escape
 from html.parser import HTMLParser
@@ -352,7 +353,9 @@ def parse_section_path_query(query: str) -> list[str]:
 
 
 def normalize_section_match_text(value: str) -> str:
-    text = normalize_text(value).casefold()
+    text = unicodedata.normalize("NFKC", value).casefold()
+    text = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", text)
+    text = re.sub(r"[\r\n\t\v\f\u00a0\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+", "", text)
     text = re.sub(r"^[\[\(\{<\s]*\d+(?:[-.]\d+)*[.)]?\s*", "", text)
     text = re.sub(r"^[\[\(\{<\s]*", "", text)
     text = re.sub(r"[\]\)\}>]\s*$", "", text)
