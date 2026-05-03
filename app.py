@@ -18,6 +18,7 @@ class ExtractedTable:
     html: str
     markdown: str
     rows: list[list[str]]
+    section_path: list[str]
 
 
 class TableHTMLParser(HTMLParser):
@@ -111,24 +112,6 @@ def rows_to_html(rows: list[list[str]]) -> str:
     return "<table>\n" + "\n".join(html_rows) + "\n</table>"
 
 
-def extract_markdown_table_blocks(markdown_text: str) -> list[str]:
-    blocks: list[str] = []
-    current_block: list[str] = []
-
-    for line in markdown_text.splitlines():
-        if "|" in line.strip():
-            current_block.append(line.rstrip())
-        elif current_block:
-            if len(current_block) >= 2:
-                blocks.append("\n".join(current_block))
-            current_block = []
-
-    if len(current_block) >= 2:
-        blocks.append("\n".join(current_block))
-
-    return blocks
-
-
 def markdown_table_to_rows(markdown_table: str) -> list[list[str]]:
     rows: list[list[str]] = []
 
@@ -145,6 +128,98 @@ def markdown_table_to_rows(markdown_table: str) -> list[list[str]]:
     return rows
 
 
+def detect_section_level(line: str) -> int | None:
+    text = normalize_text(line.strip().lstrip("#").strip())
+    if not text:
+        return None
+
+    if re.match(r"^\d+\.\s+\S", text):
+        return 1
+    if re.match(r"^\d+-\d+\.\s+\S", text):
+        return 2
+    if re.match(r"^\d+\)\s+\S", text):
+        return 3
+    if re.match(r"^\[[^\]]+\]", text):
+        return 4
+    if re.match(r"^\(\d+\)\s+\S", text):
+        return 5
+    if line.lstrip().startswith("#"):
+        return min(len(line) - len(line.lstrip("#")), 6)
+
+    return None
+
+
+def update_section_path(path: list[tuple[int, str]], line: str) -> list[tuple[int, str]]:
+    level = detect_section_level(line)
+    if level is None:
+        return path
+
+    title = normalize_text(line.strip().lstrip("#").strip())
+    if not title:
+        return path
+
+    return [(path_level, text) for path_level, text in path if path_level < level] + [(level, title)]
+
+
+def build_table_from_markdown(
+    markdown_table: str,
+    source: str,
+    section_path: list[str],
+    index: int,
+) -> ExtractedTable | None:
+    rows = markdown_table_to_rows(markdown_table)
+    if not rows:
+        return None
+
+    return ExtractedTable(
+        index=index,
+        source=source,
+        html=rows_to_html(rows),
+        markdown=rows_to_markdown(rows),
+        rows=rows,
+        section_path=section_path,
+    )
+
+
+def extract_markdown_tables_with_context(markdown_text: str, source: str) -> list[ExtractedTable]:
+    tables: list[ExtractedTable] = []
+    current_path: list[tuple[int, str]] = []
+    current_block: list[str] = []
+    current_block_path: list[str] = []
+
+    def flush_table_block() -> None:
+        nonlocal current_block, current_block_path
+        if len(current_block) < 2:
+            current_block = []
+            current_block_path = []
+            return
+
+        table = build_table_from_markdown(
+            "\n".join(current_block),
+            source=source,
+            section_path=current_block_path,
+            index=len(tables) + 1,
+        )
+        if table is not None:
+            tables.append(table)
+
+        current_block = []
+        current_block_path = []
+
+    for line in markdown_text.splitlines():
+        if "|" in line.strip():
+            if not current_block:
+                current_block_path = [text for _, text in current_path]
+            current_block.append(line.rstrip())
+            continue
+
+        flush_table_block()
+        current_path = update_section_path(current_path, line)
+
+    flush_table_block()
+    return tables
+
+
 def parse_pdf_tables(input_path: str) -> list[ExtractedTable]:
     with tempfile.TemporaryDirectory() as output_dir:
         opendataloader_pdf.convert(
@@ -155,6 +230,18 @@ def parse_pdf_tables(input_path: str) -> list[ExtractedTable]:
         )
 
         tables: list[ExtractedTable] = []
+        markdown_files = sorted(Path(output_dir).glob("*.md"))
+        markdown_files.extend(sorted(Path(output_dir).glob("*.markdown")))
+
+        for markdown_file in markdown_files:
+            markdown_text = markdown_file.read_text(encoding="utf-8")
+            for table in extract_markdown_tables_with_context(markdown_text, markdown_file.name):
+                table.index = len(tables) + 1
+                tables.append(table)
+
+        if tables:
+            return tables
+
         for html_file in sorted(Path(output_dir).glob("*.html")):
             html_text = html_file.read_text(encoding="utf-8")
             for html_table in extract_html_tables(html_text):
@@ -169,29 +256,7 @@ def parse_pdf_tables(input_path: str) -> list[ExtractedTable]:
                         html=html_table,
                         markdown=rows_to_markdown(rows),
                         rows=rows,
-                    )
-                )
-
-        if tables:
-            return tables
-
-        markdown_files = sorted(Path(output_dir).glob("*.md"))
-        markdown_files.extend(sorted(Path(output_dir).glob("*.markdown")))
-
-        for markdown_file in markdown_files:
-            markdown_text = markdown_file.read_text(encoding="utf-8")
-            for markdown_table in extract_markdown_table_blocks(markdown_text):
-                rows = markdown_table_to_rows(markdown_table)
-                if not rows:
-                    continue
-
-                tables.append(
-                    ExtractedTable(
-                        index=len(tables) + 1,
-                        source=markdown_file.name,
-                        html=rows_to_html(rows),
-                        markdown=rows_to_markdown(rows),
-                        rows=rows,
+                        section_path=[],
                     )
                 )
 
@@ -263,9 +328,50 @@ def table_search_text(table: ExtractedTable) -> str:
     return normalize_text(" ".join(cell for row in table.rows for cell in row)).casefold()
 
 
+def table_section_text(table: ExtractedTable) -> str:
+    return " > ".join(table.section_path)
+
+
 def tokenize_table_query(query: str) -> list[str]:
     tokens = re.findall(r'"([^"]+)"|(\S+)', query)
     return [quoted or plain for quoted, plain in tokens]
+
+
+def is_section_path_query(query: str) -> bool:
+    return ">>" in query or "\n" in query
+
+
+def parse_section_path_query(query: str) -> list[str]:
+    parts: list[str] = []
+    for line in query.replace(">>", "\n").splitlines():
+        text = normalize_text(line.strip().lstrip(">").strip())
+        if text:
+            parts.append(text.casefold())
+
+    return parts
+
+
+def table_matches_section_path(table: ExtractedTable, query: str) -> bool:
+    query_parts = parse_section_path_query(query)
+    if not query_parts:
+        return True
+
+    path_parts = [part.casefold() for part in table.section_path]
+    search_start = 0
+
+    for query_part in query_parts:
+        matched_index = None
+        for path_index in range(search_start, len(path_parts)):
+            if query_part in path_parts[path_index]:
+                matched_index = path_index
+                break
+
+        if matched_index is None:
+            return False
+
+        search_start = matched_index + 1
+
+    return True
 
 
 def table_matches_query(table: ExtractedTable, query: str) -> bool:
@@ -310,6 +416,9 @@ def filter_tables_by_query(tables: list[ExtractedTable], query: str) -> list[Ext
     if not cleaned_query:
         return tables
 
+    if is_section_path_query(cleaned_query):
+        return [table for table in tables if table_matches_section_path(table, cleaned_query)]
+
     return [table for table in tables if table_matches_query(table, cleaned_query)]
 
 
@@ -321,6 +430,7 @@ def render_table_micro_index(tables: list[ExtractedTable]) -> None:
             {
                 "ID": f"Table {table.index}",
                 "크기": f"{row_count}행 x {column_count}열",
+                "항목 경로": shorten_text(table_section_text(table), 160) if table.section_path else "-",
                 "식별 단서": table_fingerprint(table),
             }
         )
@@ -334,6 +444,8 @@ def render_table_preview(table: ExtractedTable) -> None:
         f"{table.source} · 전체 {row_count}행 x {column_count}열 · "
         "화면 미리보기는 성능을 위해 일부 행과 열만 표시합니다."
     )
+    if table.section_path:
+        st.caption(" > ".join(table.section_path))
     st.dataframe(
         rows_to_preview_records_limited(table.rows),
         hide_index=True,
@@ -365,10 +477,13 @@ def combine_tables(tables: list[ExtractedTable], output_format: str) -> str:
 
     for table in tables:
         title = f"Table {table.index}"
+        section_text = table_section_text(table)
         if output_format == "HTML":
-            sections.append(f"<h2>{escape(title)}</h2>\n{table.html}")
+            section_heading = f"<p><strong>{escape(section_text)}</strong></p>\n" if section_text else ""
+            sections.append(f"<h2>{escape(title)}</h2>\n{section_heading}{table.html}")
         else:
-            sections.append(f"## {title}\n\n{table.markdown}")
+            section_heading = f"\n\n{section_text}" if section_text else ""
+            sections.append(f"## {title}{section_heading}\n\n{table.markdown}")
 
     combined = "\n\n".join(sections)
     if output_format == "HTML":
@@ -402,10 +517,20 @@ else:
         st.session_state["uploaded_file_key"] = uploaded_file_key
 
     with st.form("table-search"):
-        table_query = st.text_input(
-            "테이블 내용 조건",
-            placeholder='예: 매출 AND 영업이익 / "현금흐름" OR EBITDA / 매출 NOT 전년',
-            help="공백은 AND로 처리합니다. OR, NOT, 따옴표 문구 검색을 사용할 수 있습니다. 비워두면 모든 테이블을 가져옵니다.",
+        table_query = st.text_area(
+            "테이블 내용 또는 항목 경로 조건",
+            placeholder=(
+                '예: 매출 AND 영업이익\n\n'
+                '또는\n'
+                '5. 경영지표\n'
+                '>> 5-2. 지급여력비율\n'
+                '>> 2) 지급여력비율의 경과조치 적용에 관한 세부사항'
+            ),
+            help=(
+                "한 줄 조건은 테이블 내용에서 검색합니다. 여러 줄 또는 >> 조건은 테이블이 속한 문서 항목 경로에서 검색합니다. "
+                "조건을 비워두면 모든 테이블을 가져옵니다."
+            ),
+            height=140,
         )
         submitted = st.form_submit_button("테이블 검색", type="primary")
 
