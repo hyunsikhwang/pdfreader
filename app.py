@@ -351,18 +351,35 @@ def parse_section_path_query(query: str) -> list[str]:
     return parts
 
 
+def normalize_section_match_text(value: str) -> str:
+    text = normalize_text(value).casefold()
+    text = re.sub(r"^[\[\(\{<\s]*\d+(?:[-.]\d+)*[.)]?\s*", "", text)
+    text = re.sub(r"^[\[\(\{<\s]*", "", text)
+    text = re.sub(r"[\]\)\}>]\s*$", "", text)
+    text = re.sub(r"[\s\[\]\(\)\{\}<>:：,，.;；·ㆍ-]+", "", text)
+    return text
+
+
+def section_part_matches(query_part: str, path_part: str) -> bool:
+    normalized_query = normalize_section_match_text(query_part)
+    normalized_path = normalize_section_match_text(path_part)
+    if not normalized_query:
+        return True
+
+    return normalized_query in normalized_path
+
+
 def table_matches_section_path(table: ExtractedTable, query: str) -> bool:
     query_parts = parse_section_path_query(query)
     if not query_parts:
         return True
 
-    path_parts = [part.casefold() for part in table.section_path]
     search_start = 0
 
     for query_part in query_parts:
         matched_index = None
-        for path_index in range(search_start, len(path_parts)):
-            if query_part in path_parts[path_index]:
+        for path_index in range(search_start, len(table.section_path)):
+            if section_part_matches(query_part, table.section_path[path_index]):
                 matched_index = path_index
                 break
 
