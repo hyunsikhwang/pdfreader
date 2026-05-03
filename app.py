@@ -329,7 +329,7 @@ def table_search_text(table: ExtractedTable) -> str:
 
 
 def table_section_text(table: ExtractedTable) -> str:
-    return " > ".join(table.section_path)
+    return " > ".join(getattr(table, "section_path", []))
 
 
 def tokenize_table_query(query: str) -> list[str]:
@@ -378,8 +378,9 @@ def table_matches_section_path(table: ExtractedTable, query: str) -> bool:
 
     for query_part in query_parts:
         matched_index = None
-        for path_index in range(search_start, len(table.section_path)):
-            if section_part_matches(query_part, table.section_path[path_index]):
+        section_path = getattr(table, "section_path", [])
+        for path_index in range(search_start, len(section_path)):
+            if section_part_matches(query_part, section_path[path_index]):
                 matched_index = path_index
                 break
 
@@ -395,13 +396,14 @@ def diagnose_section_path_match(table: ExtractedTable, query: str) -> dict[str, 
     query_parts = parse_section_path_query(query)
     steps: list[dict[str, object]] = []
     search_start = 0
+    section_path = getattr(table, "section_path", [])
 
     for step_index, query_part in enumerate(query_parts, start=1):
         matched_index = None
         normalized_query = normalize_section_match_text(query_part)
 
-        for path_index in range(search_start, len(table.section_path)):
-            if section_part_matches(query_part, table.section_path[path_index]):
+        for path_index in range(search_start, len(section_path)):
+            if section_part_matches(query_part, section_path[path_index]):
                 matched_index = path_index
                 break
 
@@ -425,7 +427,7 @@ def diagnose_section_path_match(table: ExtractedTable, query: str) -> dict[str, 
                 "steps": steps,
             }
 
-        matched_path = table.section_path[matched_index]
+        matched_path = section_path[matched_index]
         steps.append(
             {
                 "단계": step_index,
@@ -458,14 +460,13 @@ def render_section_path_diagnostics(tables: list[ExtractedTable], query: str) ->
 
     for diagnostic in diagnostics:
         table = diagnostic["table"]
-        assert isinstance(table, ExtractedTable)
         failed_step = diagnostic["failed_step"]
         summary_rows.append(
             {
-                "ID": f"Table {table.index}",
+                "ID": f"Table {getattr(table, 'index', '-')}",
                 "결과": "성공" if diagnostic["matched"] else f"{failed_step}단계 실패",
                 "진행": f"{diagnostic['matched_steps']} / {diagnostic['total_steps']}",
-                "항목 경로": shorten_text(table_section_text(table), 220) if table.section_path else "-",
+                "항목 경로": shorten_text(table_section_text(table), 220) if getattr(table, "section_path", []) else "-",
                 "식별 단서": table_fingerprint(table),
             }
         )
@@ -476,9 +477,8 @@ def render_section_path_diagnostics(tables: list[ExtractedTable], query: str) ->
         table_labels = {}
         for diagnostic in diagnostics:
             table = diagnostic["table"]
-            assert isinstance(table, ExtractedTable)
             result_label = "성공" if diagnostic["matched"] else f"{diagnostic['failed_step']}단계 실패"
-            table_labels[f"Table {table.index} · {result_label}"] = diagnostic
+            table_labels[f"Table {getattr(table, 'index', '-')} · {result_label}"] = diagnostic
         selected_label = st.selectbox(
             "단계별 상세",
             options=list(table_labels.keys()),
@@ -544,7 +544,7 @@ def render_table_micro_index(tables: list[ExtractedTable]) -> None:
             {
                 "ID": f"Table {table.index}",
                 "크기": f"{row_count}행 x {column_count}열",
-                "항목 경로": shorten_text(table_section_text(table), 160) if table.section_path else "-",
+                "항목 경로": shorten_text(table_section_text(table), 160) if getattr(table, "section_path", []) else "-",
                 "식별 단서": table_fingerprint(table),
             }
         )
@@ -558,8 +558,8 @@ def render_table_preview(table: ExtractedTable) -> None:
         f"{table.source} · 전체 {row_count}행 x {column_count}열 · "
         "화면 미리보기는 성능을 위해 일부 행과 열만 표시합니다."
     )
-    if table.section_path:
-        st.caption(" > ".join(table.section_path))
+    if getattr(table, "section_path", []):
+        st.caption(table_section_text(table))
     st.dataframe(
         rows_to_preview_records_limited(table.rows),
         hide_index=True,
