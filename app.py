@@ -391,6 +391,103 @@ def table_matches_section_path(table: ExtractedTable, query: str) -> bool:
     return True
 
 
+def diagnose_section_path_match(table: ExtractedTable, query: str) -> dict[str, object]:
+    query_parts = parse_section_path_query(query)
+    steps: list[dict[str, object]] = []
+    search_start = 0
+
+    for step_index, query_part in enumerate(query_parts, start=1):
+        matched_index = None
+        normalized_query = normalize_section_match_text(query_part)
+
+        for path_index in range(search_start, len(table.section_path)):
+            if section_part_matches(query_part, table.section_path[path_index]):
+                matched_index = path_index
+                break
+
+        if matched_index is None:
+            steps.append(
+                {
+                    "단계": step_index,
+                    "검색 항목": query_part,
+                    "정규화 검색어": normalized_query,
+                    "상태": "실패",
+                    "매칭된 문서 항목": "",
+                    "검색 시작 위치": search_start + 1,
+                }
+            )
+            return {
+                "table": table,
+                "matched": False,
+                "matched_steps": step_index - 1,
+                "total_steps": len(query_parts),
+                "failed_step": step_index,
+                "steps": steps,
+            }
+
+        matched_path = table.section_path[matched_index]
+        steps.append(
+            {
+                "단계": step_index,
+                "검색 항목": query_part,
+                "정규화 검색어": normalized_query,
+                "상태": "성공",
+                "매칭된 문서 항목": matched_path,
+                "검색 시작 위치": search_start + 1,
+            }
+        )
+        search_start = matched_index + 1
+
+    return {
+        "table": table,
+        "matched": True,
+        "matched_steps": len(query_parts),
+        "total_steps": len(query_parts),
+        "failed_step": None,
+        "steps": steps,
+    }
+
+
+def render_section_path_diagnostics(tables: list[ExtractedTable], query: str) -> None:
+    if not is_section_path_query(query):
+        return
+
+    diagnostics = [diagnose_section_path_match(table, query) for table in tables]
+    matched_count = sum(1 for diagnostic in diagnostics if diagnostic["matched"])
+    summary_rows = []
+
+    for diagnostic in diagnostics:
+        table = diagnostic["table"]
+        assert isinstance(table, ExtractedTable)
+        failed_step = diagnostic["failed_step"]
+        summary_rows.append(
+            {
+                "ID": f"Table {table.index}",
+                "결과": "성공" if diagnostic["matched"] else f"{failed_step}단계 실패",
+                "진행": f"{diagnostic['matched_steps']} / {diagnostic['total_steps']}",
+                "항목 경로": shorten_text(table_section_text(table), 220) if table.section_path else "-",
+                "식별 단서": table_fingerprint(table),
+            }
+        )
+
+    with st.expander(f"항목 경로 검색 진단 · {matched_count}/{len(tables)}개 성공", expanded=matched_count == 0):
+        st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+        table_labels = {}
+        for diagnostic in diagnostics:
+            table = diagnostic["table"]
+            assert isinstance(table, ExtractedTable)
+            result_label = "성공" if diagnostic["matched"] else f"{diagnostic['failed_step']}단계 실패"
+            table_labels[f"Table {table.index} · {result_label}"] = diagnostic
+        selected_label = st.selectbox(
+            "단계별 상세",
+            options=list(table_labels.keys()),
+            key="section-path-diagnostic-detail",
+        )
+        selected_diagnostic = table_labels[selected_label]
+        st.dataframe(selected_diagnostic["steps"], hide_index=True, use_container_width=True)
+
+
 def table_matches_query(table: ExtractedTable, query: str) -> bool:
     tokens = tokenize_table_query(query)
     if not tokens:
@@ -593,6 +690,8 @@ else:
                 st.caption(f"적용 조건: `{active_query}`")
             else:
                 st.caption("조건 없이 모든 테이블을 표시합니다.")
+
+            render_section_path_diagnostics(tables, active_query)
 
             if not filtered_tables:
                 st.warning("조건에 맞는 테이블이 없습니다. 검색어 또는 논리 조건을 조정해 주세요.")
